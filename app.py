@@ -23,16 +23,40 @@ st.title("📰 Media Intelligence & Sentiment Monitoring System")
 st.caption("Platform Pemantauan Isu, Analisis Sentimen, dan Rekomendasi Komunikasi Strategis")
 
 # ==========================================
-# 2. ENGINE PEMINDAI BERITA (DENGAN FILTER WAKTU)
+# 2. HELPER: EKSTRAKSI SUMMARY & SCREENSHOT
 # ==========================================
-def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=10):
+def extract_bullet_summary(text, max_bullets=3):
     """
-    Mengambil berita via Google News RSS dengan batasan waktu spesifik.
-    time_window: '1d' (24 jam), '2d' (2 hari), '7d' (1 minggu), '30d' (1 bulan), 'all' (tanpa batas).
+    Menyaring teks artikel menjadi 2-3 butir kalimat inti ringkas.
     """
+    cleaned = re.sub(r'<[^<]+?>', '', text).strip()
+    sentences = re.split(r'(?<=[.!?])\s+', cleaned)
+    bullets = [s.strip() for s in sentences if len(s.strip()) > 25]
+    if not bullets:
+        bullets = ["Pemberitaan memuat perkembangan operasional dan kebijakan terkini terkait entitas."]
+    return bullets[:max_bullets]
+
+def fetch_article_image_bytes(link):
+    """
+    Mengambil gambar tangkapan layar/thumbnail berita.
+    Menggunakan WordPress mShots API (bebas biaya & tanpa browser berat di RAM).
+    """
+    try:
+        # Layanan screenshot web gratis berbasis URL
+        screenshot_url = f"https://s0.wp.com/mshots/v1/{urllib.parse.quote(link)}?w=700"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(screenshot_url, headers=headers, timeout=5)
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            return resp.content
+    except Exception:
+        pass
+    return None
+
+# ==========================================
+# 3. ENGINE PEMINDAI BERITA
+# ==========================================
+def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=6):
     base_query = f"{entity_name} {issue_keywords}".strip()
-    
-    # Menambahkan operator batasan waktu bawaan Google
     if time_window != "all":
         query = f"{base_query} when:{time_window}"
     else:
@@ -44,16 +68,15 @@ def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=10):
     feed = feedparser.parse(rss_url)
     articles = []
 
-    # Korpus kata kunci sentimen reputasi
     negative_lexicon = [
         "korupsi", "rugi", "bobol", "fraud", "kasus", "gagal", "demo", "kecewa",
         "macet", "krisis", "tuntutan", "phk", "ancam", "turun", "pidana", "gugat", 
-        "disorot", "hukum", "sita", "penipuan", "keluhan", "masalah"
+        "disorot", "hukum", "sita", "penipuan", "keluhan", "masalah", "denda"
     ]
     positive_lexicon = [
         "laba", "untung", "tumbuh", "prestasi", "penghargaan", "inovasi", "sukses",
         "dividen", "ekspansi", "naik", "resmikan", "unggul", "mitra", "positif", 
-        "rekor", "terbaik", "kinerja positif", "apresiasi"
+        "rekor", "terbaik", "kinerja positif", "apresiasi", "capai"
     ]
 
     for entry in feed.entries[:max_results]:
@@ -61,7 +84,6 @@ def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=10):
         link = entry.link
         published = entry.get("published", "Waktu publikasi tidak tercantum")
         
-        # Pisahkan judul dan nama publisher media
         source = "Media Nasional"
         clean_title = title
         if " - " in title:
@@ -69,12 +91,14 @@ def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=10):
             clean_title = parts[0]
             source = parts[1]
 
-        # Bersihkan format ringkasan HTML
         raw_summary = entry.get("summary", "")
         soup = BeautifulSoup(raw_summary, "html.parser")
         snippet = soup.get_text()
 
-        # Skoring Sentimen Sederhana
+        # Ekstraksi 2-3 butir isi pemberitaan
+        bullet_points = extract_bullet_summary(snippet)
+
+        # Skoring Sentimen
         title_lower = clean_title.lower()
         neg_count = sum(1 for word in negative_lexicon if word in title_lower)
         pos_count = sum(1 for word in positive_lexicon if word in title_lower)
@@ -84,27 +108,30 @@ def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=10):
             pr_tone = "High Risk / Potential Crisis"
             pr_rec = (
                 "Rekomendasi Konsultan Media:\n"
-                "1. Segera rilis 'Holding Statement' dan aktifkan crisis room monitoring.\n"
+                "1. Segera siapkan 'Holding Statement' dan aktifkan crisis room monitoring.\n"
                 "2. Berikan fakta berimbang kepada jurnalis peliput sebelum isu tereskalasi.\n"
-                "3. Jangan bersikap reaktif di media sosial; fokus pada kanal komunikasi resmi."
+                "3. Jangan bersikap defensif secara terbuka; perkuat narasi penanganan konkret."
             )
         elif pos_count > neg_count:
             sentiment = "Positif"
             pr_tone = "Strategic Advantage / Good Traction"
             pr_rec = (
                 "Rekomendasi Konsultan Media:\n"
-                "1. Amplifikasi narasi melalui media berbayar/terbina (owned & earned media).\n"
-                "2. Manfaatkan momentum positif untuk 'Executive Thought Leadership' pimpinan.\n"
-                "3. Dokumentasikan pencapaian sebagai bahan annual report / investor updates."
+                "1. Amplifikasi narasi melalui media berbayar/terbina (owned & earned channels).\n"
+                "2. Manfaatkan momentum positif untuk 'Executive Thought Leadership' direksi.\n"
+                "3. Dokumentasikan materi sebagai aset reputasi korporasi."
             )
         else:
             sentiment = "Netral"
             pr_tone = "Informative / Passive Coverage"
             pr_rec = (
                 "Rekomendasi Konsultan Media:\n"
-                "1. Pantau potensi pergeseran sentimen pada pemberitaan lanjutan.\n"
-                "2. Siapkan data lembar fakta (factsheet) jika media memerlukan konfirmasi."
+                "1. Pantau arah eskalasi pada siklus berita berikutnya (follow-up coverage).\n"
+                "2. Siapkan data penunjang jika ada jurnalis yang mengajukan konfirmasi."
             )
+
+        # Ambil screenshot tangkapan layar berita
+        img_bytes = fetch_article_image_bytes(link)
 
         articles.append({
             "title": clean_title,
@@ -112,15 +139,17 @@ def fetch_news(entity_name, issue_keywords, time_window="2d", max_results=10):
             "published": published,
             "link": link,
             "snippet": snippet,
+            "bullets": bullet_points,
             "sentiment": sentiment,
             "pr_tone": pr_tone,
-            "pr_rec": pr_rec
+            "pr_rec": pr_rec,
+            "image_bytes": img_bytes
         })
 
     return articles
 
 # ==========================================
-# 3. GENERATOR PRESENTASI POWERPOINT (.PPTX)
+# 4. GENERATOR PRESENTASI POWERPOINT (.PPTX)
 # ==========================================
 def generate_pptx_deck(entity_name, org_type, time_label, articles):
     prs = Presentation()
@@ -150,18 +179,12 @@ def generate_pptx_deck(entity_name, org_type, time_label, articles):
     p2.font.size = Pt(14)
     p2.font.color.rgb = RGBColor(100, 110, 125)
 
-    p3 = tf.add_paragraph()
-    p3.text = "Disusun oleh: Senior Strategic Media & Reputation Advisory"
-    p3.font.size = Pt(13)
-    p3.font.italic = True
-    p3.font.color.rgb = RGBColor(140, 150, 160)
-
-    # --- SLIDE 2+: SPLIT 2-KOLOM (KIRI: KLIPING, KANAN: REKOMENDASI) ---
+    # --- SLIDE 2+: TATA LETAK 2 KOLOM ---
     for idx, art in enumerate(articles, 1):
         slide = prs.slides.add_slide(blank_layout)
 
-        # Header Slide
-        header_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11.7), Inches(0.7))
+        # Header Bar Slide
+        header_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11.7), Inches(0.6))
         htf = header_box.text_frame
         hp = htf.paragraphs[0]
         hp.text = f"ANALISIS ISU MEDIA #{idx}: {art['source'].upper()}"
@@ -169,66 +192,100 @@ def generate_pptx_deck(entity_name, org_type, time_label, articles):
         hp.font.bold = True
         hp.font.color.rgb = RGBColor(30, 41, 59)
 
-        # SISI KIRI: CAPTURE / KLIPING PEMBERITAAN
-        left_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.3), Inches(5.6), Inches(5.6))
+        # ==========================================
+        # SISI KIRI: DOKUMEN PEMBERITAAN & SCREENSHOT
+        # ==========================================
+        # 1. Dokumen Header Berita
+        left_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.1), Inches(5.6), Inches(2.2))
         ltf = left_box.text_frame
         ltf.word_wrap = True
 
         lp1 = ltf.paragraphs[0]
         lp1.text = "DOKUMENTASI PEMBERITAAN"
-        lp1.font.size = Pt(12)
+        lp1.font.size = Pt(11)
         lp1.font.bold = True
         lp1.font.color.rgb = RGBColor(100, 116, 139)
 
         lp2 = ltf.add_paragraph()
-        lp2.text = f"\n\"{art['title']}\""
-        lp2.font.size = Pt(17)
+        lp2.text = f"\"{art['title']}\""
+        lp2.font.size = Pt(14)
         lp2.font.bold = True
         lp2.font.color.rgb = RGBColor(15, 23, 42)
 
         lp3 = ltf.add_paragraph()
-        lp3.text = f"\nKanal/Penerbit: {art['source']}\nWaktu Terbit: {art['published']}\n"
-        lp3.font.size = Pt(11)
+        lp3.text = f"Kanal: {art['source']} | Waktu: {art['published']}"
+        lp3.font.size = Pt(10)
         lp3.font.color.rgb = RGBColor(71, 85, 105)
 
-        lp4 = ltf.add_paragraph()
-        clean_snippet = re.sub('<[^<]+?>', '', art['snippet'])
-        lp4.text = f"Cuplikan Teks:\n{clean_snippet[:260]}..."
-        lp4.font.size = Pt(11)
-        lp4.font.color.rgb = RGBColor(51, 65, 85)
+        # 2. Screenshot Berita (di bawah dokumen pemberitaan)
+        if art.get("image_bytes"):
+            try:
+                img_stream = io.BytesIO(art["image_bytes"])
+                slide.shapes.add_picture(
+                    img_stream, 
+                    Inches(0.8), Inches(3.4), 
+                    width=Inches(5.6), height=Inches(3.5)
+                )
+            except Exception:
+                pass
+        else:
+            # Placeholder jika screenshot gagal dimuat
+            ph_box = slide.shapes.add_textbox(Inches(0.8), Inches(3.5), Inches(5.6), Inches(3.0))
+            ph_tf = ph_box.text_frame
+            ph_p = ph_tf.paragraphs[0]
+            ph_p.text = "[Screenshot tangkapan layar web tidak tersedia secara langsung]"
+            ph_p.font.size = Pt(11)
+            ph_p.font.italic = True
+            ph_p.font.color.rgb = RGBColor(148, 163, 184)
 
-        # SISI KANAN: REVIEW KONSULTAN & STRATEGIC RECOMMENDATIONS
-        right_box = slide.shapes.add_textbox(Inches(6.8), Inches(1.3), Inches(5.7), Inches(5.6))
+        # ==========================================
+        # SISI KANAN: SUMMARY (2-3 BUTIR) + STRATEGIC ADVISORY
+        # ==========================================
+        right_box = slide.shapes.add_textbox(Inches(6.8), Inches(1.1), Inches(5.7), Inches(5.9))
         rtf = right_box.text_frame
         rtf.word_wrap = True
 
+        # Bagian A: Summary Pemberitaan (2-3 Butir) - Posisi DI ATAS Advisory
         rp1 = rtf.paragraphs[0]
-        rp1.text = "STRATEGIC MEDIA REVIEW & ADVISORY"
-        rp1.font.size = Pt(12)
+        rp1.text = "RINGKASAN PEMBERITAAN (KEY TAKEAWAYS)"
+        rp1.font.size = Pt(11)
         rp1.font.bold = True
         rp1.font.color.rgb = RGBColor(14, 116, 144)
 
-        rp2 = rtf.add_paragraph()
-        rp2.text = f"\nKlasifikasi Sentimen: {art['sentiment'].upper()}"
-        rp2.font.size = Pt(14)
-        rp2.font.bold = True
+        for b in art['bullets']:
+            bp = rtf.add_paragraph()
+            bp.text = f"• {b}"
+            bp.font.size = Pt(11)
+            bp.font.color.rgb = RGBColor(30, 41, 59)
+
+        # Pembatas Antar Bagian
+        div_p = rtf.add_paragraph()
+        div_p.text = "―" * 28
+        div_p.font.size = Pt(9)
+        div_p.font.color.rgb = RGBColor(203, 213, 225)
+
+        # Bagian B: Strategic Media Review & Advisory
+        adv_title = rtf.add_paragraph()
+        adv_title.text = "STRATEGIC MEDIA REVIEW & ADVISORY"
+        adv_title.font.size = Pt(11)
+        adv_title.font.bold = True
+        adv_title.font.color.rgb = RGBColor(14, 116, 144)
+
+        sent_p = rtf.add_paragraph()
+        sent_p.text = f"Sentimen: {art['sentiment'].upper()} ({art['pr_tone']})"
+        sent_p.font.size = Pt(12)
+        sent_p.font.bold = True
         if art['sentiment'] == "Negatif":
-            rp2.font.color.rgb = RGBColor(220, 38, 38)
+            sent_p.font.color.rgb = RGBColor(220, 38, 38)
         elif art['sentiment'] == "Positif":
-            rp2.font.color.rgb = RGBColor(22, 163, 74)
+            sent_p.font.color.rgb = RGBColor(22, 163, 74)
         else:
-            rp2.font.color.rgb = RGBColor(202, 138, 4)
+            sent_p.font.color.rgb = RGBColor(202, 138, 4)
 
-        rp3 = rtf.add_paragraph()
-        rp3.text = f"Tone Dampak: {art['pr_tone']}\n"
-        rp3.font.size = Pt(11)
-        rp3.font.italic = True
-        rp3.font.color.rgb = RGBColor(100, 116, 139)
-
-        rp4 = rtf.add_paragraph()
-        rp4.text = f"{art['pr_rec']}"
-        rp4.font.size = Pt(12)
-        rp4.font.color.rgb = RGBColor(15, 23, 42)
+        rec_p = rtf.add_paragraph()
+        rec_p.text = f"{art['pr_rec']}"
+        rec_p.font.size = Pt(11)
+        rec_p.font.color.rgb = RGBColor(15, 23, 42)
 
     output_stream = io.BytesIO()
     prs.save(output_stream)
@@ -236,7 +293,7 @@ def generate_pptx_deck(entity_name, org_type, time_label, articles):
     return output_stream
 
 # ==========================================
-# 4. TAMPILAN SIDEBAR & KONTROL INPUT
+# 5. TAMPILAN SIDEBAR & KONTROL INPUT
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Pengaturan Parameter")
@@ -250,7 +307,6 @@ with st.sidebar:
     ])
     keywords_input = st.text_input("Kata Kunci / Topik Isu", value="layanan kinerja laba", help="Pisahkan dengan spasi")
 
-    # Dropdown Pemilihan Batasan Waktu
     time_options = {
         "24 Jam Terakhir (Hari Ini)": "1d",
         "2 Hari Terakhir": "2d",
@@ -267,14 +323,14 @@ with st.sidebar:
     )
     time_window_val = time_options[selected_time_label]
 
-    max_news = st.slider("Jumlah Berita Dipantau", min_value=3, max_value=20, value=6)
+    max_news = st.slider("Jumlah Berita Dipantau", min_value=3, max_value=12, value=6)
     run_btn = st.button("Mulai Monitoring & Analisis", type="primary")
 
 # ==========================================
-# 5. EKSEKUSI & TAMPILAN HASIL
+# 6. EKSEKUSI & TAMPILAN HASIL
 # ==========================================
 if run_btn:
-    with st.spinner("Sedang memindai pemberitaan media nasional dan menyusun telaah PR..."):
+    with st.spinner("Sedang memindai pemberitaan, mengambil capture layar, dan menyusun telaah konsultan..."):
         st.session_state['news_data'] = fetch_news(
             entity_name=entity_input,
             issue_keywords=keywords_input,
@@ -289,9 +345,9 @@ if 'news_data' in st.session_state:
     articles = st.session_state.get('news_data', [])
 
     if not articles:
-        st.warning("Tidak ditemukan pemberitaan pada rentang waktu tersebut. Coba perpanjang rentang waktu atau buat kata kunci lebih umum.")
+        st.warning("Tidak ditemukan pemberitaan pada rentang waktu tersebut. Coba perpanjang rentang waktu atau gunakan kata kunci yang lebih umum.")
     else:
-        # Metrik Ringkasan Sentimen
+        # Metrik Ringkasan
         pos_count = sum(1 for a in articles if a['sentiment'] == "Positif")
         neg_count = sum(1 for a in articles if a['sentiment'] == "Negatif")
         neu_count = sum(1 for a in articles if a['sentiment'] == "Netral")
@@ -299,7 +355,7 @@ if 'news_data' in st.session_state:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total Berita Dipindai", len(articles))
         col2.metric("Sentimen Positif", pos_count)
-        col3.metric("Sentimen Negatif (Mitigasi)", neg_count)
+        col3.metric("Sentimen Negatif", neg_count)
         col4.metric("Sentimen Netral", neu_count)
 
         st.divider()
@@ -312,13 +368,13 @@ if 'news_data' in st.session_state:
             articles
         )
         st.download_button(
-            label="📥 Unduh Laporan Slide Deck (.PPTX) Siap Paparan",
+            label="📥 Unduh Laporan Slide Deck (.PPTX) Lengkap Screenshot & Summary",
             data=pptx_file,
             file_name=f"PR_Audit_{st.session_state['entity'].replace(' ', '_')}.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
 
-        # Pratinjau 2 Kolom di Web
+        # Pratinjau di Layar Web
         st.subheader("📋 Dashboard Telaah Media & Rekomendasi Konsultan")
         for idx, art in enumerate(articles, 1):
             with st.container():
@@ -327,14 +383,23 @@ if 'news_data' in st.session_state:
                 with c_left:
                     st.markdown(f"### [#{idx}] {art['title']}")
                     st.caption(f"**Sumber:** {art['source']} | **Waktu:** {art['published']}")
-                    clean_text = re.sub('<[^<]+?>', '', art['snippet'])
-                    st.markdown(f"> *\"{clean_text[:250]}...\"*")
-                    st.markdown(f"[Buka Berita Asli]({art['link']})")
+                    
+                    # Tampilan Screenshot di Web
+                    if art.get("image_bytes"):
+                        st.image(art["image_bytes"], caption=f"Capture Layar Pemberitaan #{idx}", use_container_width=True)
+                    st.markdown(f"[🔗 Baca Berita Asli]({art['link']})")
 
                 with c_right:
+                    # 1. Summary Berita (2-3 Butir) di ATAS Strategic Advisory
+                    st.markdown("#### 📝 Ringkasan Isi Pemberitaan:")
+                    for b in art['bullets']:
+                        st.markdown(f"- {b}")
+                    
+                    st.markdown("---")
+                    
+                    # 2. Strategic Advisory
                     badge_color = "🟢" if art['sentiment'] == "Positif" else "🔴" if art['sentiment'] == "Negatif" else "🟡"
-                    st.markdown(f"#### {badge_color} Sentimen: **{art['sentiment']}**")
-                    st.write(f"**PR Tone:** {art['pr_tone']}")
+                    st.markdown(f"#### {badge_color} Sentimen: **{art['sentiment']}** ({art['pr_tone']})")
                     st.info(art['pr_rec'])
 
                 st.markdown("---")
