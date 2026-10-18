@@ -23,7 +23,7 @@ st.set_page_config(
 )
 
 st.title("📡 Media & Social Intelligence Monitoring System")
-st.caption("Monitoring Berita Nasional, Media Lokal/Kecil, Medsos, serta Rekomendasi Media Konsultan")
+st.caption("Pemantauan Berita Nasional, Media Lokal, Medsos + Rekomendasi PR Eksekutif & Slide PPTX Lengkap")
 
 # ==========================================
 # 2. HELPER TANGGAL & PARSING KATA KUNCI
@@ -34,39 +34,24 @@ BULAN_ID = {
 }
 
 def calculate_date_range_label(time_val):
-    """
-    Menghitung rentang tanggal presisi untuk sampul laporan PPTX
-    Contoh output: '16 Oktober 2026 – 18 Oktober 2026'
-    """
     today = datetime.now()
     days_map = {"1d": 1, "2d": 2, "3d": 3, "7d": 7, "30d": 30}
     
     if time_val in days_map:
         start_date = today - timedelta(days=days_map[time_val])
-        if days_map[time_val] == 1:
-            return f"{start_date.day} {BULAN_ID[start_date.month]} {start_date.year} – {today.day} {BULAN_ID[today.month]} {today.year}"
         return f"{start_date.day} {BULAN_ID[start_date.month]} {start_date.year} – {today.day} {BULAN_ID[today.month]} {today.year}"
     else:
         return f"Hingga {today.day} {BULAN_ID[today.month]} {today.year} (Semua Periode)"
 
 def build_keyword_query(keywords_raw):
-    """
-    Mengurai input kata kunci fleksibel (koma, tanda kutip, spasi)
-    Contoh: 'mandiri, "bank mandiri", hutan, "hutan terbakar"'
-    Output: '("bank mandiri" OR "hutan terbakar" OR mandiri OR hutan)'
-    """
     if not keywords_raw.strip():
         return ""
-    
-    # Pisahkan berdasarkan koma atau baris baru
     parts = re.split(r'[,;\n]+', keywords_raw)
     parsed_tokens = []
-    
     for p in parts:
         token = p.strip()
         if not token:
             continue
-        # Jika mengandung spasi dan belum diapit tanda kutip, tambahkan tanda kutip ganda
         if " " in token and not (token.startswith('"') and token.endswith('"')):
             parsed_tokens.append(f'"{token}"')
         else:
@@ -79,10 +64,14 @@ def build_keyword_query(keywords_raw):
     return "(" + " OR ".join(parsed_tokens) + ")"
 
 # ==========================================
-# 3. GENERATOR KARTU VISUAL CAPTURE (PNG)
+# 3. GENERATOR KARTU VISUAL CAPTURE (PNG NATIVE)
 # ==========================================
 def generate_press_capture_card(channel_type, source, title, published, snippet, sentiment):
-    width, height = 700, 480
+    """
+    Membuat file gambar PNG berkualitas tinggi dari clipping berita.
+    Dijamin selalu valid dan langsung muncul di slide PowerPoint.
+    """
+    width, height = 800, 520
     bg_color = (255, 255, 255)
     
     if sentiment == "Negatif":
@@ -98,19 +87,25 @@ def generate_press_capture_card(channel_type, source, title, published, snippet,
     img = Image.new("RGB", (width, height), bg_color)
     draw = ImageDraw.Draw(img)
 
-    draw.rectangle([(0, 0), (width - 1, height - 1)], outline=(203, 213, 225), width=2)
-    draw.rectangle([(0, 0), (width, 50)], fill=(241, 245, 249))
-    draw.rectangle([(0, 0), (8, height)], fill=accent_color)
+    # Frame Border Luar
+    draw.rectangle([(0, 0), (width - 1, height - 1)], outline=(203, 213, 225), width=3)
+    
+    # Top Bar Header
+    draw.rectangle([(0, 0), (width, 55)], fill=(241, 245, 249))
+    draw.rectangle([(0, 0), (10, height)], fill=accent_color)
 
-    type_tag = "[MEDIA SOSIAL]" if channel_type == "medsos" else "[PORTAL/WEBSITE]"
-    draw.text((25, 16), f"{type_tag}  •  {source.upper()}", fill=(30, 41, 59))
+    # Label Media / Channel
+    tag = "[MEDIA SOSIAL]" if channel_type == "medsos" else "[PORTAL BERITA]"
+    draw.text((25, 18), f"{tag}  •  {source.upper()}", fill=(30, 41, 59))
 
-    draw.rectangle([(width - 140, 12), (width - 20, 38)], fill=badge_bg)
-    draw.text((width - 125, 17), sentiment.upper(), fill=accent_color)
+    # Badge Sentimen
+    draw.rectangle([(width - 150, 12), (width - 25, 42)], fill=badge_bg)
+    draw.text((width - 135, 18), sentiment.upper(), fill=accent_color)
 
-    draw.text((25, 65), f"Waktu Terbit/Temuan: {published}", fill=(100, 116, 139))
+    # Waktu
+    draw.text((25, 70), f"Waktu Rilis / Temuan: {published}", fill=(100, 116, 139))
 
-    def wrap_text(text, limit=48):
+    def wrap_text(text, limit=46):
         lines, cur = [], []
         for w in text.split():
             if sum(len(x) + 1 for x in cur) + len(w) <= limit:
@@ -122,26 +117,29 @@ def generate_press_capture_card(channel_type, source, title, published, snippet,
             lines.append(" ".join(cur))
         return lines
 
-    y_text = 95
-    draw.text((25, y_text), "HEADLINE / JUDUL POSTINGAN:", fill=(71, 85, 105))
-    y_text += 22
+    # Headline
+    y = 105
+    draw.text((25, y), "HEADLINE / JUDUL:", fill=(71, 85, 105))
+    y += 24
+    for line in wrap_text(title, limit=42)[:3]:
+        draw.text((25, y), line, fill=(15, 23, 42))
+        y += 26
 
-    for line in wrap_text(title, limit=40)[:3]:
-        draw.text((25, y_text), line, fill=(15, 23, 42))
-        y_text += 25
+    # Garis Pembatas
+    y += 12
+    draw.line([(25, y), (width - 25, y)], fill=(226, 232, 240), width=1)
+    y += 18
 
-    y_text += 10
-    draw.line([(25, y_text), (width - 25, y_text)], fill=(226, 232, 240), width=1)
-    y_text += 15
-
-    draw.text((25, y_text), "DOKUMENTASI KUTIPAN KONTEN:", fill=(71, 85, 105))
-    y_text += 22
+    # Cuplikan Isi
+    draw.text((25, y), "KUTIPAN KONTEN / TEKS ARTIKEL:", fill=(71, 85, 105))
+    y += 24
     for line in wrap_text(snippet, limit=48)[:5]:
-        draw.text((25, y_text), line, fill=(51, 65, 85))
-        y_text += 22
+        draw.text((25, y), line, fill=(51, 65, 85))
+        y += 24
 
-    draw.rectangle([(0, height - 35), (width, height)], fill=(248, 250, 252))
-    draw.text((25, height - 25), "VERIFIED BY STRATEGIC MEDIA AUDIT ENGINE", fill=(148, 163, 184))
+    # Footer Watermark
+    draw.rectangle([(0, height - 38), (width, height)], fill=(248, 250, 252))
+    draw.text((25, height - 26), "DIVERIFIKASI MEDIA INTELLIGENCE ADVISORY SYSTEM", fill=(148, 163, 184))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -149,23 +147,16 @@ def generate_press_capture_card(channel_type, source, title, published, snippet,
     return buf.getvalue()
 
 # ==========================================
-# 4. ENGINE SUMMARY & SCRAPING (MENJANGKAU MEDIA KECIL)
+# 4. SUMMARY MINIMAL 2 BUTIR
 # ==========================================
 def extract_bullet_summary(title, text, min_bullets=2, max_bullets=3):
-    """
-    Memastikan ringkasan SELALU memuat MINIMAL 2 BUTIR informasi.
-    """
     cleaned = re.sub(r'<[^<]+?>', '', text).strip()
-    # Pisahkan berdasarkan tanda titik, seru, tanya, atau titik koma
     sentences = re.split(r'(?<=[.!?])\s+', cleaned)
     bullets = [s.strip() for s in sentences if len(s.strip()) > 25]
 
-    # Jika kurang dari 2 butir, buat dari klausa judul atau analisis substansi
     if len(bullets) < 2:
         bullets = []
-        # Butir 1: Fokus Isu Utama
         bullets.append(f"Fokus Utama: {title.strip()}")
-        # Butir 2: Rincian Narasi
         if len(cleaned) > 20:
             bullets.append(f"Substansi Pemberitaan: {cleaned[:140]}...")
         else:
@@ -173,22 +164,18 @@ def extract_bullet_summary(title, text, min_bullets=2, max_bullets=3):
             
     return bullets[:max_bullets]
 
+# ==========================================
+# 5. ENGINE PEMINDAI BERITA & MEDSOS
+# ==========================================
 def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, include_news, include_social, include_small_media):
     parsed_kw = build_keyword_query(raw_keywords)
     combined_query_base = f"{entity_name} {parsed_kw}".strip()
 
     search_targets = []
-    
-    # 1. Google News Standar (Media Mainstream)
     if include_news:
         search_targets.append(("news", combined_query_base, "online_news"))
-
-    # 2. Google Search RSS (Menjangkau media lokal, situs daerah, web kecil)
     if include_small_media:
-        # Menghapus filter eksklusif agar situs non-mainstream terangkut
         search_targets.append(("web", combined_query_base, "local_web"))
-
-    # 3. Media Sosial (Instagram, Facebook, Threads, X, TikTok)
     if include_social:
         social_dork = "(site:instagram.com OR site:facebook.com OR site:threads.net OR site:twitter.com OR site:x.com OR site:tiktok.com)"
         search_targets.append(("social", f"{combined_query_base} {social_dork}", "medsos"))
@@ -214,14 +201,7 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
             final_q = query_str
 
         encoded_q = urllib.parse.quote(final_q)
-        
-        # Tentukan endpoint RSS berdasarkan tipe pencarian
-        if target_type == "web":
-            # Endpoint feed web Google untuk menjaring situs kecil/lokal
-            rss_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=id&gl=ID&ceid=ID:id"
-        else:
-            rss_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=id&gl=ID&ceid=ID:id"
-
+        rss_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=id&gl=ID&ceid=ID:id"
         feed = feedparser.parse(rss_url)
 
         for entry in feed.entries:
@@ -233,14 +213,13 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
             title = entry.title
             published = entry.get("published", "Terkini")
             
-            source = "Media / Portal"
+            source = "Media Nasional"
             clean_title = title
             if " - " in title:
                 parts = title.rsplit(" - ", 1)
                 clean_title = parts[0]
                 source = parts[1]
 
-            # Identifikasi Medsos vs Media Lokal
             lower_link = link.lower()
             if channel_type == "medsos" or any(s in lower_link for s in ["instagram.com", "facebook.com", "threads.net", "twitter.com", "x.com", "tiktok.com"]):
                 channel_type = "medsos"
@@ -260,55 +239,53 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
             soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
             snippet = soup.get_text()
 
-            # Pastikan minimal 2 butir informasi
             bullet_points = extract_bullet_summary(clean_title, snippet, min_bullets=2)
 
-            # Analisis Sentimen
             t_low = (clean_title + " " + snippet).lower()
             neg_count = sum(1 for w in negative_lexicon if w in t_low)
             pos_count = sum(1 for w in positive_lexicon if w in t_low)
 
             if neg_count > pos_count:
                 sentiment = "Negatif"
-                pr_tone = "High Risk / Reputational Crisis"
+                pr_tone = "High Risk / Potential Crisis"
                 if channel_type == "medsos":
                     pr_rec = (
                         "Rekomendasi Respons Medsos:\n"
-                        "1. Aktifkan Social Media Response Unit; berikan respons penyejuk di kolom komentar dalam 1 jam.\n"
-                        "2. Jangan hapus unggahan komplain publik; arahkan ke formulir pelaporan/DM terverifikasi.\n"
-                        "3. Siapkan FAQ untuk menangkal rumor viral yang belum tentu faktual."
+                        "1. Aktifkan Social Media Response Unit untuk menjawab komplain dengan santun.\n"
+                        "2. Jangan menghapus kritik warganet secara sepihak; arahkan ke jalur pelaporan resmi.\n"
+                        "3. Pantau laju interaksi untuk mencegah eskalasi menjadi trending topic."
                     )
                 else:
                     pr_rec = (
                         "Rekomendasi Konsultan Media:\n"
-                        "1. Segera distribusikan lembar klarifikasi/hak jawab kepada redaksi pembuat berita.\n"
-                        "2. Buat media monitoring harian terhadap potensi pengutipan oleh media tier-1.\n"
-                        "3. Siapkan juru bicara resmi untuk pernyataan pers terpadu."
+                        "1. Segera siapkan 'Holding Statement' resmi dan sebarkan hak jawab proporsional.\n"
+                        "2. Adakan media briefing proaktif kepada jurnalis peliput untuk meluruskan fakta.\n"
+                        "3. Siapkan FAQ mitigasi isu bagi juru bicara institusi."
                     )
             elif pos_count > neg_count:
                 sentiment = "Positif"
-                pr_tone = "Strategic Traction / Positive PR"
+                pr_tone = "Strategic Traction / Good PR"
                 if channel_type == "medsos":
                     pr_rec = (
                         "Rekomendasi Respons Medsos:\n"
-                        "1. Kurasi dan unggah ulang (re-share/quote) konten ini ke kanal media sosial resmi entitas.\n"
-                        "2. Jalin interaksi positif dengan pembuat konten sebagai bentuk apresiasi komunitas.\n"
-                        "3. Jadikan bahan amplifikasi konten mingguan."
+                        "1. Repost dan amplifikasi postingan ke kanal Instagram/Threads resmi institusi.\n"
+                        "2. Jalin engagement dengan memberikan likes/komentar apresiasi resmi.\n"
+                        "3. Gunakan materi sebagai 'Social Proof' kredibilitas layanan."
                     )
                 else:
                     pr_rec = (
                         "Rekomendasi Konsultan Media:\n"
-                        "1. Amplifikasi narasi positif melalui sindikasi siaran pers ke jaringan media nasional.\n"
-                        "2. Manfaatkan momentum untuk memperkuat reputasi kepemimpinan dan CSR korporasi.\n"
-                        "3. Dokumentasikan materi ke dalam laporan tahunan/keberlanjutan."
+                        "1. Amplifikasi narasi positif melalui siaran pers lanjutan ke media nasional.\n"
+                        "2. Jadikan rujukan pada public expose pimpinan dan bahan laporan tahunan.\n"
+                        "3. Jaga hubungan relasi media dengan jurnalis yang meliput prestasi ini."
                     )
             else:
                 sentiment = "Netral"
                 pr_tone = "Informative / General Update"
                 pr_rec = (
                     "Rekomendasi Konsultan Media:\n"
-                    "1. Cermati perkembangan isu apakah berpotensi bergeser ke arah negatif.\n"
-                    "2. Sediakan materi pendukung jika ada jurnalis atau netizen yang meminta konfirmasi data."
+                    "1. Monitor dinamika pemberitaan lanjutan (follow-up coverage).\n"
+                    "2. Sediakan factsheet ringkas jika terdapat awak media yang meminta rincian data."
                 )
 
             card_bytes = generate_press_capture_card(
@@ -338,7 +315,7 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
     return items
 
 # ==========================================
-# 5. GENERATOR PRESENTASI (.PPTX)
+# 6. GENERATOR PPTX DENGAN LINK & SLIDE RANGKUMAN AKHIR
 # ==========================================
 def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     prs = Presentation()
@@ -346,7 +323,7 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     prs.slide_height = Inches(7.5)
     blank_layout = prs.slide_layouts[6]
 
-    # --- SLIDE 1: COVER DENGAN PERIODE TANGGAL DINAMIS ---
+    # --- SLIDE 1: COVER ---
     cover_slide = prs.slides.add_slide(blank_layout)
     title_box = cover_slide.shapes.add_textbox(Inches(1.0), Inches(1.8), Inches(11.33), Inches(4.0))
     tf = title_box.text_frame
@@ -359,11 +336,10 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     p0.font.color.rgb = RGBColor(20, 35, 60)
 
     p1 = tf.add_paragraph()
-    p1.text = f"Target Entitas: {entity_name} | Sektor: {org_type}"
+    p1.text = f"Target Entitas: {entity_name} | Kategori: {org_type}"
     p1.font.size = Pt(22)
     p1.font.color.rgb = RGBColor(70, 80, 95)
 
-    # PERIODE TANGGAL SPESIFIK PADA JUDUL SAMPUL
     p2 = tf.add_paragraph()
     p2.text = f"Periode Pemantauan: {date_period_label}"
     p2.font.size = Pt(16)
@@ -376,35 +352,54 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     p3.font.italic = True
     p3.font.color.rgb = RGBColor(120, 130, 145)
 
-    # --- SLIDE 2+: TATA LETAK 2 KOLOM ---
+    # --- SLIDE 2+: PER ITEM DOKUMENTASI (2 KOLOM) ---
     for idx, art in enumerate(articles, 1):
         slide = prs.slides.add_slide(blank_layout)
 
+        # Header Title
         header_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11.7), Inches(0.6))
         htf = header_box.text_frame
         hp = htf.paragraphs[0]
         channel_tag = "MEDSOS" if art['channel_type'] == "medsos" else "MEDIA"
-        hp.text = f"TEMUAN #{idx} [{channel_tag}] : {art['source'].upper()}"
+        hp.text = f"DOKUMENTASI #{idx} [{channel_tag}] : {art['source'].upper()}"
         hp.font.size = Pt(17)
         hp.font.bold = True
         hp.font.color.rgb = RGBColor(30, 41, 59)
 
-        # SISI KIRI: CAPTURE CARD
+        # SISI KIRI: GAMBAR CAPTURE PNG (EMBEDDED LOKAL)
         if art.get("image_bytes"):
             img_stream = io.BytesIO(art["image_bytes"])
             slide.shapes.add_picture(
                 img_stream, 
-                Inches(0.8), Inches(1.3), 
-                width=Inches(5.7), height=Inches(5.6)
+                Inches(0.8), Inches(1.2), 
+                width=Inches(5.6), height=Inches(4.8)
             )
 
-        # SISI KANAN: RINGKASAN (MINIMAL 2 BUTIR) + STRATEGIC ADVISORY
-        right_box = slide.shapes.add_textbox(Inches(6.8), Inches(1.3), Inches(5.7), Inches(5.6))
+        # LINK TAUTAN AKTIF DI BAWAH SCREENSHOT (BISA DIKLIK)
+        link_box = slide.shapes.add_textbox(Inches(0.8), Inches(6.1), Inches(5.6), Inches(0.8))
+        ltf = link_box.text_frame
+        ltf.word_wrap = True
+        lp = ltf.paragraphs[0]
+        lp.text = f"🔗 Tautan Sumber ({art['source']}):\n"
+        lp.font.size = Pt(10)
+        lp.font.bold = True
+        lp.font.color.rgb = RGBColor(71, 85, 105)
+
+        # Tambahkan Hyperlink aktif
+        link_p = ltf.add_paragraph()
+        link_p.text = art['link'][:65] + ("..." if len(art['link']) > 65 else "")
+        link_p.font.size = Pt(10)
+        link_p.font.underline = True
+        link_p.font.color.rgb = RGBColor(37, 99, 235)
+        link_p.hyperlink.address = art['link']
+
+        # SISI KANAN: RINGKASAN MINIMAL 2 BUTIR + STRATEGIC ADVISORY
+        right_box = slide.shapes.add_textbox(Inches(6.7), Inches(1.2), Inches(5.8), Inches(5.7))
         rtf = right_box.text_frame
         rtf.word_wrap = True
 
         rp1 = rtf.paragraphs[0]
-        rp1.text = "RINGKASAN PEMBERITAAN (MIN. 2 BUTIR INFORMASI)"
+        rp1.text = "RINGKASAN PEMBERITAAN (KEY TAKEAWAYS)"
         rp1.font.size = Pt(11)
         rp1.font.bold = True
         rp1.font.color.rgb = RGBColor(14, 116, 144)
@@ -442,13 +437,94 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
         rec_p.font.size = Pt(11)
         rec_p.font.color.rgb = RGBColor(15, 23, 42)
 
+    # ==========================================
+    # SLIDE TERAKHIR: EXECUTIVE STRATEGIC ADVISORY SUMMARY
+    # ==========================================
+    summary_slide = prs.slides.add_slide(blank_layout)
+
+    sum_header = summary_slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11.7), Inches(0.8))
+    stf = sum_header.text_frame
+    sp = stf.paragraphs[0]
+    sp.text = "EXECUTIVE SUMMARY: STRATEGIC ACTIONABLE RECOMMENDATIONS"
+    sp.font.size = Pt(20)
+    sp.font.bold = True
+    sp.font.color.rgb = RGBColor(20, 35, 60)
+
+    # 3 Kolom Matriks Rekomendasi (Negatif, Netral, Positif)
+    col_w = Inches(3.7)
+    gap = Inches(0.3)
+    start_x = Inches(0.8)
+    top_y = Inches(1.3)
+    card_h = Inches(5.6)
+
+    # Kategori 1: Krisis & Isu Negatif
+    neg_box = summary_slide.shapes.add_textbox(start_x, top_y, col_w, card_h)
+    ntf = neg_box.text_frame
+    ntf.word_wrap = True
+    np1 = ntf.paragraphs[0]
+    np1.text = "ISU NEGATIF / KRISIS"
+    np1.font.size = Pt(14)
+    np1.font.bold = True
+    np1.font.color.rgb = RGBColor(220, 38, 38)
+
+    np2 = ntf.add_paragraph()
+    np2.text = (
+        "Langkah Mitigasi Eksekutif:\n"
+        "• Segera rilis Hak Jawab / Holding Statement resmi dalam 24 jam.\n"
+        "• Lakukan penelusuran fakta objektif internal sebelum juru bicara berbicara di publik.\n"
+        "• Berikan penanganan santun & terarah pada kanal keluhan publik/medsos.\n"
+        "• Pantau agar isu lokal tidak tereskalasi menjadi isu nasional di media tier-1."
+    )
+    np2.font.size = Pt(11)
+    np2.font.color.rgb = RGBColor(51, 65, 85)
+
+    # Kategori 2: Isu Netral
+    neu_box = summary_slide.shapes.add_textbox(start_x + col_w + gap, top_y, col_w, card_h)
+    netf = neu_box.text_frame
+    netf.word_wrap = True
+    nep1 = netf.paragraphs[0]
+    nep1.text = "ISU NETRAL / INFORMATIF"
+    nep1.font.size = Pt(14)
+    nep1.font.bold = True
+    nep1.font.color.rgb = RGBColor(202, 138, 4)
+
+    nep2 = netf.add_paragraph()
+    nep2.text = (
+        "Langkah Pengawasan & Edukasi:\n"
+        "• Cermati perkembangan isu apakah terdapat potensi pergeseran persepsi publik.\n"
+        "• Sediakan lembar fakta (factsheet) pendukung bagi wartawan yang meminta data komparasi.\n"
+        "• Edukasi publik melalui artikel opini atau infografis sederhana di situs web resmi."
+    )
+    nep2.font.size = Pt(11)
+    nep2.font.color.rgb = RGBColor(51, 65, 85)
+
+    # Kategori 3: Isu Positif & Prestasi
+    pos_box = summary_slide.shapes.add_textbox(start_x + (col_w + gap) * 2, top_y, col_w, card_h)
+    ptf = pos_box.text_frame
+    ptf.word_wrap = True
+    pp1 = ptf.paragraphs[0]
+    pp1.text = "ISU POSITIF / PRESTASI"
+    pp1.font.size = Pt(14)
+    pp1.font.bold = True
+    pp1.font.color.rgb = RGBColor(22, 163, 74)
+
+    pp2 = ptf.add_paragraph()
+    pp2.text = (
+        "Langkah Amplifikasi Reputasi:\n"
+        "• Perluas jangkauan narasi prestasi ke owned media (LinkedIn, Press Release, IG Reels/Threads).\n"
+        "• Manfaatkan momentum keberhasilan untuk Thought Leadership Direksi/Pimpinan.\n"
+        "• Jalin silaturahmi apresiasi dengan jurnalis yang memberitakan secara berimbang."
+    )
+    pp2.font.size = Pt(11)
+    pp2.font.color.rgb = RGBColor(51, 65, 85)
+
     output_stream = io.BytesIO()
     prs.save(output_stream)
     output_stream.seek(0)
     return output_stream
 
 # ==========================================
-# 6. SIDEBAR & INTERFACE
+# 7. SIDEBAR KONTROL INPUT
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Konfigurasi Monitoring")
@@ -462,11 +538,10 @@ with st.sidebar:
         "Personal / Tokoh Publik"
     ])
     
-    # Input kata kunci fleksibel (frasa, koma, dsb.)
     keywords_input = st.text_area(
         "Kata Kunci / Frasa Isu (Bisa kombinasi):",
         value='mandiri, "bank mandiri", layanan, fraud',
-        help='Gunakan koma untuk memisahkan. Contoh: mandiri, "bank mandiri", hutan, "hutan terbakar"'
+        help='Pisahkan dengan koma atau baris baru. Contoh: mandiri, "bank mandiri", hutan, "hutan terbakar"'
     )
 
     st.subheader("🌐 Jangkauan Sumber Media")
@@ -486,7 +561,6 @@ with st.sidebar:
     selected_time_label = st.selectbox("Pilih Rentang", list(time_options.keys()), index=1)
     time_val = time_options[selected_time_label]
     
-    # Menghitung label tanggal untuk ditampilkan di UI dan PPTX
     calculated_date_label = calculate_date_range_label(time_val)
     st.caption(f"🗓️ **Periode Aktif:** {calculated_date_label}")
 
@@ -500,13 +574,13 @@ with st.sidebar:
     run_btn = st.button("🚀 Mulai Pemindaian Lintas Media", type="primary")
 
 # ==========================================
-# 7. DASHBOARD & EKSPOR
+# 8. DASHBOARD & EKSPOR
 # ==========================================
 if run_btn:
     if not (inc_news or inc_small or inc_social):
         st.error("Silakan centang minimal satu sumber data!")
     else:
-        with st.spinner("Memindai media nasional, website lokal, dan medsos..."):
+        with st.spinner("Memindai media nasional, web lokal, medsos, dan menyiapkan slide eksekutif..."):
             st.session_state['news_data'] = fetch_media_and_social(
                 entity_name=entity_input,
                 raw_keywords=keywords_input,
@@ -534,7 +608,7 @@ if 'news_data' in st.session_state:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Temuan", total_items)
         c2.metric("Sentimen Positif", pos_count)
-        c3.metric("Sentimen Negatif (Perlu Mitigasi)", neg_count)
+        c2_neg = c3.metric("Sentimen Negatif (Mitigasi)", neg_count)
         c4.metric("Sentimen Netral", neu_count)
 
         st.divider()
@@ -547,7 +621,7 @@ if 'news_data' in st.session_state:
             articles
         )
         st.download_button(
-            label=f"📥 Unduh Laporan Slide Deck ({total_items} Slide .PPTX - Periode {st.session_state['date_label']})",
+            label=f"📥 Unduh Laporan Slide Deck ({total_items + 2} Slide .PPTX Termasuk Rangkuman Eksekutif)",
             data=pptx_file,
             file_name=f"PR_Audit_{st.session_state['entity'].replace(' ', '_')}.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -560,7 +634,7 @@ if 'news_data' in st.session_state:
                 
                 with col_left:
                     st.image(art["image_bytes"], caption=f"Capture Dokumen #{idx} - {art['source']}", use_container_width=True)
-                    st.markdown(f"[🔗 Buka Tautan Asli ({art['source']})]({art['link']})")
+                    st.markdown(f"🔗 **Tautan Langsung:** [{art['link'][:70]}...]({art['link']})")
 
                 with col_right:
                     st.markdown(f"### #{idx}: {art['title']}")
