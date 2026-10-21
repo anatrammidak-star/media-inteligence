@@ -1,5 +1,7 @@
 import io
+import os
 import re
+import json
 import urllib.parse
 from datetime import datetime, timedelta
 import feedparser
@@ -9,12 +11,13 @@ from bs4 import BeautifulSoup
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import streamlit as st
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN STREAMLIT
+# 1. KONFIGURASI HALAMAN & DIREKTORI
 # ==========================================
 st.set_page_config(
     page_title="Media & Social Intelligence Monitor",
@@ -22,96 +25,126 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📡 Media & Social Intelligence Monitoring System")
-st.caption("Pemantauan Berita Nasional, Media Lokal/Kecil, Medsos, serta Rekomendasi Konsultan Media & Slide PPTX Lengkap")
+EXPORT_DIR = "exports"
+CONFIG_FILE = "scheduler_config.json"
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
-# ==========================================
-# 2. HELPER TANGGAL & PARSER KATA KUNCI
-# ==========================================
 BULAN_ID = {
     1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
     7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember"
 }
 
+# ==========================================
+# 2. HELPER QUERY, WAKTU & PERSISTENSI CONFIG
+# ==========================================
 def calculate_date_range_label(time_val):
-    """
-    Menghitung rentang tanggal presisi untuk sampul laporan PPTX
-    Contoh: '16 Oktober 2026 – 18 Oktober 2026'
-    """
     today = datetime.now()
-    days_map = {"1d": 1, "2d": 2, "3d": 3, "7d": 7, "30d": 30}
+    if time_val.endswith("h"):
+        hours = int(time_val.replace("h", ""))
+        start_time = today - timedelta(hours=hours)
+        return f"{start_time.strftime('%H:%M')} – {today.strftime('%H:%M WIB')} ({today.day} {BULAN_ID[today.month]} {today.year})"
     
+    days_map = {"1d": 1, "2d": 2, "3d": 3, "7d": 7, "30d": 30}
     if time_val in days_map:
         start_date = today - timedelta(days=days_map[time_val])
         return f"{start_date.day} {BULAN_ID[start_date.month]} {start_date.year} – {today.day} {BULAN_ID[today.month]} {today.year}"
-    else:
-        return f"Hingga {today.day} {BULAN_ID[today.month]} {today.year} (Semua Periode)"
+    return f"Hingga {today.day} {BULAN_ID[today.month]} {today.year} (Semua Periode)"
 
-def build_keyword_query(keywords_raw):
-    """
-    Mengurai input kata kunci fleksibel (koma, tanda kutip ganda, spasi).
-    Contoh: 'mandiri, "bank mandiri", hutan, "hutan terbakar"'
-    Output: '("bank mandiri" OR "hutan terbakar" OR mandiri OR hutan)'
-    """
-    if not keywords_raw.strip():
-        return ""
-    parts = re.split(r'[,;\n]+', keywords_raw)
-    parsed_tokens = []
-    for p in parts:
-        token = p.strip()
-        if not token:
+def build_advanced_query(entity_name, raw_keywords, match_in_title=False, exclude_gov=True, custom_exclude_domains=""):
+    entity_clean = entity_name.strip()
+    if " " in entity_clean and not (entity_clean.startswith('"') and entity_clean.endswith('"')):
+        entity_token = f'"{entity_clean}"'
+    else:
+        entity_token = entity_clean
+
+    raw_tokens = re.split(r'[,;\n]+', raw_keywords)
+    parsed_keywords = []
+    for token in raw_tokens:
+        t = token.strip()
+        if not t:
             continue
-        if " " in token and not (token.startswith('"') and token.endswith('"')):
-            parsed_tokens.append(f'"{token}"')
+        if " " in t and not (t.startswith('"') and t.endswith('"')):
+            parsed_keywords.append(f'"{t}"')
         else:
-            parsed_tokens.append(token)
-            
-    if not parsed_tokens:
-        return ""
-    if len(parsed_tokens) == 1:
-        return parsed_tokens[0]
-    return "(" + " OR ".join(parsed_tokens) + ")"
+            parsed_keywords.append(t)
+
+    if parsed_keywords:
+        kw_part = parsed_keywords[0] if len(parsed_keywords) == 1 else f"({' OR '.join(parsed_keywords)})"
+        base_query = f"{entity_token} AND {kw_part}"
+    else:
+        base_query = entity_token
+
+    if match_in_title:
+        base_query = f"allintitle: {base_query}"
+
+    exclude_clauses = []
+    if exclude_gov:
+        exclude_clauses.append("-site:go.id")
+
+    if custom_exclude_domains.strip():
+        for d in re.split(r'[,;\s]+', custom_exclude_domains):
+            d_clean = d.strip().replace("https://", "").replace("http://", "").replace("/", "")
+            if d_clean:
+                exclude_clauses.append(f"-site:{d_clean}")
+
+    if exclude_clauses:
+        base_query = f"{base_query} {' '.join(exclude_clauses)}"
+
+    return base_query
+
+def load_scheduler_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "active": False,
+        "hours": ["08:00", "13:00", "18:00"],
+        "entity": "Bank Mandiri",
+        "org_type": "Perbankan / Finansial",
+        "keywords": 'csr, "kinerja keuangan", kredit macet, dividen',
+        "time_val": "6h",
+        "max_results": 15,
+        "include_news": True,
+        "include_small": True,
+        "include_social": True,
+        "match_title": False,
+        "exclude_gov": True,
+        "custom_exclude": "bankmandiri.co.id, mandiri.co.id"
+    }
+
+def save_scheduler_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
 
 # ==========================================
-# 3. GENERATOR KARTU CAPTURE VISUAL (PNG)
+# 3. KARTU CAPTURE VISUAL (PNG NATIVE)
 # ==========================================
 def generate_press_capture_card(channel_type, source, title, published, snippet, sentiment):
-    """
-    Membuat file gambar PNG kartu kliping berkualitas tinggi secara programatik.
-    Disematkan langsung ke PowerPoint (embedded), ringan, dan anti-gagal/tidak loading mutar.
-    """
     width, height = 800, 520
     bg_color = (255, 255, 255)
     
     if sentiment == "Negatif":
-        accent_color = (220, 38, 38)
-        badge_bg = (254, 226, 226)
+        accent_color, badge_bg = (220, 38, 38), (254, 226, 226)
     elif sentiment == "Positif":
-        accent_color = (22, 163, 74)
-        badge_bg = (220, 252, 231)
+        accent_color, badge_bg = (22, 163, 74), (220, 252, 231)
     else:
-        accent_color = (202, 138, 4)
-        badge_bg = (254, 243, 199)
+        accent_color, badge_bg = (202, 138, 4), (254, 243, 199)
 
     img = Image.new("RGB", (width, height), bg_color)
     draw = ImageDraw.Draw(img)
 
-    # Frame border luar
     draw.rectangle([(0, 0), (width - 1, height - 1)], outline=(203, 213, 225), width=3)
-    
-    # Header Bar
     draw.rectangle([(0, 0), (width, 55)], fill=(241, 245, 249))
     draw.rectangle([(0, 0), (10, height)], fill=accent_color)
 
-    # Label Channel
     tag = "[MEDIA SOSIAL]" if channel_type == "medsos" else "[PORTAL BERITA]"
     draw.text((25, 18), f"{tag}  •  {source.upper()}", fill=(30, 41, 59))
 
-    # Badge Sentimen di kanan atas
     draw.rectangle([(width - 150, 12), (width - 25, 42)], fill=badge_bg)
     draw.text((width - 135, 18), sentiment.upper(), fill=accent_color)
-
-    # Waktu
     draw.text((25, 70), f"Waktu Rilis / Temuan: {published}", fill=(100, 116, 139))
 
     def wrap_text(text, limit=46):
@@ -126,27 +159,23 @@ def generate_press_capture_card(channel_type, source, title, published, snippet,
             lines.append(" ".join(cur))
         return lines
 
-    # Headline
     y = 105
-    draw.text((25, y), "HEADLINE / JUDUL POSTINGAN:", fill=(71, 85, 105))
+    draw.text((25, y), "HEADLINE / JUDUL:", fill=(71, 85, 105))
     y += 24
     for line in wrap_text(title, limit=42)[:3]:
         draw.text((25, y), line, fill=(15, 23, 42))
         y += 26
 
-    # Garis Pembatas
     y += 12
     draw.line([(25, y), (width - 25, y)], fill=(226, 232, 240), width=1)
     y += 18
 
-    # Cuplikan Konten
     draw.text((25, y), "DOKUMENTASI KUTIPAN KONTEN:", fill=(71, 85, 105))
     y += 24
     for line in wrap_text(snippet, limit=48)[:5]:
         draw.text((25, y), line, fill=(51, 65, 85))
         y += 24
 
-    # Footer Watermark
     draw.rectangle([(0, height - 38), (width, height)], fill=(248, 250, 252))
     draw.text((25, height - 26), "VERIFIED BY STRATEGIC MEDIA AUDIT ENGINE", fill=(148, 163, 184))
 
@@ -155,39 +184,37 @@ def generate_press_capture_card(channel_type, source, title, published, snippet,
     buf.seek(0)
     return buf.getvalue()
 
-# ==========================================
-# 4. RINGKASAN BERITA MINIMAL 2 BUTIR
-# ==========================================
 def extract_bullet_summary(title, text, min_bullets=2, max_bullets=3):
     cleaned = re.sub(r'<[^<]+?>', '', text).strip()
     sentences = re.split(r'(?<=[.!?])\s+', cleaned)
     bullets = [s.strip() for s in sentences if len(s.strip()) > 25]
 
     if len(bullets) < 2:
-        bullets = []
-        bullets.append(f"Fokus Utama: {title.strip()}")
+        bullets = [f"Fokus Utama: {title.strip()}"]
         if len(cleaned) > 20:
             bullets.append(f"Substansi Pemberitaan: {cleaned[:140]}...")
         else:
-            bullets.append("Publikasi menyoroti dinamika operasional dan respons para pihak terkait subjek.")
+            bullets.append("Publikasi menyoroti dinamika operasional dan respons publik terkait subjek.")
             
     return bullets[:max_bullets]
 
 # ==========================================
-# 5. ENGINE PEMINDAI MULTI-CHANNEL (NASIONAL, LOKAL, MEDSOS)
+# 4. ENGINE PEMINDAIAN BERITA & MEDSOS
 # ==========================================
-def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, include_news, include_social, include_small_media):
-    parsed_kw = build_keyword_query(raw_keywords)
-    combined_query_base = f"{entity_name} {parsed_kw}".strip()
+def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, include_news, include_social, include_small_media, match_in_title, exclude_gov, custom_exclude):
+    advanced_q = build_advanced_query(
+        entity_name, raw_keywords, match_in_title=match_in_title, 
+        exclude_gov=exclude_gov, custom_exclude_domains=custom_exclude
+    )
 
     search_targets = []
     if include_news:
-        search_targets.append(("news", combined_query_base, "online_news"))
+        search_targets.append(("news", advanced_q, "online_news"))
     if include_small_media:
-        search_targets.append(("web", combined_query_base, "local_web"))
+        search_targets.append(("web", advanced_q, "local_web"))
     if include_social:
         social_dork = "(site:instagram.com OR site:facebook.com OR site:threads.net OR site:twitter.com OR site:x.com OR site:tiktok.com)"
-        search_targets.append(("social", f"{combined_query_base} {social_dork}", "medsos"))
+        search_targets.append(("social", f"{advanced_q} {social_dork}", "medsos"))
 
     negative_lexicon = [
         "korupsi", "rugi", "bobol", "fraud", "kasus", "gagal", "demo", "kecewa",
@@ -204,11 +231,7 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
     seen_links = set()
 
     for target_type, query_str, channel_type in search_targets:
-        if time_window != "all":
-            final_q = f"{query_str} when:{time_window}"
-        else:
-            final_q = query_str
-
+        final_q = f"{query_str} when:{time_window}" if time_window != "all" else query_str
         encoded_q = urllib.parse.quote(final_q)
         rss_url = f"https://news.google.com/rss/search?q={encoded_q}&hl=id&gl=ID&ceid=ID:id"
         feed = feedparser.parse(rss_url)
@@ -221,13 +244,14 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
 
             title = entry.title
             published = entry.get("published", "Terkini")
-            
             source = "Media Nasional"
             clean_title = title
             if " - " in title:
                 parts = title.rsplit(" - ", 1)
-                clean_title = parts[0]
-                source = parts[1]
+                clean_title, source = parts[0], parts[1]
+
+            if exclude_gov and (".go.id" in link.lower() or ".go.id" in source.lower()):
+                continue
 
             lower_link = link.lower()
             if channel_type == "medsos" or any(s in lower_link for s in ["instagram.com", "facebook.com", "threads.net", "twitter.com", "x.com", "tiktok.com"]):
@@ -247,7 +271,6 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
 
             soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
             snippet = soup.get_text()
-
             bullet_points = extract_bullet_summary(clean_title, snippet, min_bullets=2)
 
             t_low = (clean_title + " " + snippet).lower()
@@ -260,8 +283,8 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
                 if channel_type == "medsos":
                     pr_rec = (
                         "Rekomendasi Respons Medsos:\n"
-                        "1. Aktifkan Social Media Response Unit; berikan respons penyejuk di kolom komentar dalam 1 jam.\n"
-                        "2. Jangan hapus komplain warganet secara sepihak; arahkan ke formulir pelaporan/DM terverifikasi.\n"
+                        "1. Aktifkan Social Media Response Unit; berikan tanggapan penyejuk di kolom komentar dalam 1 jam.\n"
+                        "2. Jangan menghapus kritik warganet secara sepihak; arahkan ke formulir pelaporan/DM terverifikasi.\n"
                         "3. Siapkan FAQ untuk menangkal rumor viral yang belum tentu faktual."
                     )
                 else:
@@ -277,16 +300,16 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
                 if channel_type == "medsos":
                     pr_rec = (
                         "Rekomendasi Respons Medsos:\n"
-                        "1. Repost dan amplifikasi postingan ke kanal Instagram/Threads resmi institusi.\n"
-                        "2. Jalin interaksi engagement dengan memberikan likes/komentar apresiasi resmi.\n"
-                        "3. Gunakan materi sebagai 'Social Proof' kredibilitas dan performa entitas."
+                        "1. Repost dan amplifikasi postingan ke kanal media sosial resmi institusi.\n"
+                        "2. Jalin engagement dengan memberikan likes/komentar apresiasi resmi.\n"
+                        "3. Gunakan materi sebagai Social Proof kredibilitas institusi."
                     )
                 else:
                     pr_rec = (
                         "Rekomendasi Konsultan Media:\n"
                         "1. Amplifikasi narasi positif melalui siaran pers lanjutan ke media nasional.\n"
-                        "2. Jadikan rujukan pada public expose pimpinan dan bahan laporan tahunan.\n"
-                        "3. Jaga hubungan relasi media dengan jurnalis yang meliput prestasi ini."
+                        "2. Jadikan rujukan pada public expose pimpinan dan bahan laporan berkala.\n"
+                        "3. Jaga hubungan relasi media dengan jurnalis peliput."
                     )
             else:
                 sentiment = "Netral"
@@ -317,14 +340,13 @@ def fetch_media_and_social(entity_name, raw_keywords, time_window, max_results, 
 
             if max_results != "unlimited" and len(items) >= int(max_results):
                 break
-        
         if max_results != "unlimited" and len(items) >= int(max_results):
             break
 
-    return items
+    return items, advanced_q
 
 # ==========================================
-# 6. GENERATOR SLIDE PPTX (DENGAN RUN HYPERLINK & SUMMARY AKHIR)
+# 5. GENERATOR SLIDE PPTX
 # ==========================================
 def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     prs = Presentation()
@@ -332,7 +354,7 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     prs.slide_height = Inches(7.5)
     blank_layout = prs.slide_layouts[6]
 
-    # --- SLIDE 1: COVER DENGAN PERIODE TANGGAL SPESIFIK ---
+    # COVER SLIDE
     cover_slide = prs.slides.add_slide(blank_layout)
     title_box = cover_slide.shapes.add_textbox(Inches(1.0), Inches(1.8), Inches(11.33), Inches(4.0))
     tf = title_box.text_frame
@@ -361,11 +383,10 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     p3.font.italic = True
     p3.font.color.rgb = RGBColor(120, 130, 145)
 
-    # --- SLIDE 2+: PER ITEM DOKUMENTASI (LAYOUT 2 KOLOM) ---
+    # CONTENT SLIDES
     for idx, art in enumerate(articles, 1):
         slide = prs.slides.add_slide(blank_layout)
 
-        # Header Title
         header_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11.7), Inches(0.6))
         htf = header_box.text_frame
         hp = htf.paragraphs[0]
@@ -375,27 +396,20 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
         hp.font.bold = True
         hp.font.color.rgb = RGBColor(30, 41, 59)
 
-        # SISI KIRI: CAPTURE CARD PNG (EMBEDDED LOKAL)
         if art.get("image_bytes"):
             img_stream = io.BytesIO(art["image_bytes"])
-            slide.shapes.add_picture(
-                img_stream, 
-                Inches(0.8), Inches(1.2), 
-                width=Inches(5.6), height=Inches(4.8)
-            )
+            slide.shapes.add_picture(img_stream, Inches(0.8), Inches(1.2), width=Inches(5.6), height=Inches(4.8))
 
-        # TAUTAN SUMBER BERITA (HYPERLINK RUN AKTIF)
+        # TAUTAN SUMBER BISA DIKLIK
         link_box = slide.shapes.add_textbox(Inches(0.8), Inches(6.1), Inches(5.6), Inches(0.8))
         ltf = link_box.text_frame
         ltf.word_wrap = True
-        
         lp = ltf.paragraphs[0]
         lp.text = f"🔗 Tautan Sumber ({art['source']}):"
         lp.font.size = Pt(10)
         lp.font.bold = True
         lp.font.color.rgb = RGBColor(71, 85, 105)
 
-        # Perbaikan bug: gunakan add_run() untuk menyematkan hyperlink
         link_p = ltf.add_paragraph()
         run = link_p.add_run()
         run.text = art['link'][:65] + ("..." if len(art['link']) > 65 else "")
@@ -404,7 +418,7 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
         run.font.color.rgb = RGBColor(37, 99, 235)
         run.hyperlink.address = art['link']
 
-        # SISI KANAN: RINGKASAN (MINIMAL 2 BUTIR) + STRATEGIC ADVISORY
+        # RINGKASAN & ADVISORY
         right_box = slide.shapes.add_textbox(Inches(6.7), Inches(1.2), Inches(5.8), Inches(5.7))
         rtf = right_box.text_frame
         rtf.word_wrap = True
@@ -448,9 +462,8 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
         rec_p.font.size = Pt(11)
         rec_p.font.color.rgb = RGBColor(15, 23, 42)
 
-    # --- SLIDE TERAKHIR: EXECUTIVE STRATEGIC ADVISORY SUMMARY ---
+    # EXECUTIVE SUMMARY SLIDE
     summary_slide = prs.slides.add_slide(blank_layout)
-
     sum_header = summary_slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11.7), Inches(0.8))
     stf = sum_header.text_frame
     sp = stf.paragraphs[0]
@@ -459,14 +472,9 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     sp.font.bold = True
     sp.font.color.rgb = RGBColor(20, 35, 60)
 
-    # 3 Kolom Matriks Rekomendasi (Negatif, Netral, Positif)
-    col_w = Inches(3.7)
-    gap = Inches(0.3)
-    start_x = Inches(0.8)
-    top_y = Inches(1.3)
-    card_h = Inches(5.6)
+    col_w, gap, start_x, top_y, card_h = Inches(3.7), Inches(0.3), Inches(0.8), Inches(1.3), Inches(5.6)
 
-    # Kolom 1: Negatif / Krisis
+    # Negatif
     neg_box = summary_slide.shapes.add_textbox(start_x, top_y, col_w, card_h)
     ntf = neg_box.text_frame
     ntf.word_wrap = True
@@ -475,7 +483,6 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     np1.font.size = Pt(14)
     np1.font.bold = True
     np1.font.color.rgb = RGBColor(220, 38, 38)
-
     np2 = ntf.add_paragraph()
     np2.text = (
         "Langkah Mitigasi Eksekutif:\n"
@@ -487,7 +494,7 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     np2.font.size = Pt(11)
     np2.font.color.rgb = RGBColor(51, 65, 85)
 
-    # Kolom 2: Netral
+    # Netral
     neu_box = summary_slide.shapes.add_textbox(start_x + col_w + gap, top_y, col_w, card_h)
     netf = neu_box.text_frame
     netf.word_wrap = True
@@ -496,7 +503,6 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     nep1.font.size = Pt(14)
     nep1.font.bold = True
     nep1.font.color.rgb = RGBColor(202, 138, 4)
-
     nep2 = netf.add_paragraph()
     nep2.text = (
         "Langkah Pengawasan & Edukasi:\n"
@@ -507,7 +513,7 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     nep2.font.size = Pt(11)
     nep2.font.color.rgb = RGBColor(51, 65, 85)
 
-    # Kolom 3: Positif
+    # Positif
     pos_box = summary_slide.shapes.add_textbox(start_x + (col_w + gap) * 2, top_y, col_w, card_h)
     ptf = pos_box.text_frame
     ptf.word_wrap = True
@@ -516,7 +522,6 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     pp1.font.size = Pt(14)
     pp1.font.bold = True
     pp1.font.color.rgb = RGBColor(22, 163, 74)
-
     pp2 = ptf.add_paragraph()
     pp2.text = (
         "Langkah Amplifikasi Reputasi:\n"
@@ -533,129 +538,307 @@ def generate_pptx_deck(entity_name, org_type, date_period_label, articles):
     return output_stream
 
 # ==========================================
-# 7. SIDEBAR KONTROL INPUT
+# 6. JOB PENJADWALAN OTOMATIS (BACKGROUND WORKER)
 # ==========================================
-with st.sidebar:
-    st.header("⚙️ Konfigurasi Monitoring")
-    entity_input = st.text_input("Nama Entitas / Target", value="Bank Mandiri")
-    org_type_input = st.selectbox("Kategori Entitas", [
-        "Perbankan / Finansial", 
-        "BUMN / Pemerintahan", 
-        "Kehutanan / Lingkungan Hidup",
-        "Korporasi Swasta", 
-        "Lembaga Publik / NGO", 
-        "Personal / Tokoh Publik"
-    ])
-    
-    keywords_input = st.text_area(
-        "Kata Kunci / Frasa Isu (Bisa kombinasi):",
-        value='mandiri, "bank mandiri", layanan, fraud',
-        help='Pisahkan dengan koma atau baris baru. Contoh: mandiri, "bank mandiri", hutan, "hutan terbakar"'
+def automated_monitoring_job():
+    """Fungsi yang dieksekusi secara periodik oleh APScheduler"""
+    cfg = load_scheduler_config()
+    if not cfg.get("active", False):
+        return
+
+    date_label = calculate_date_range_label(cfg["time_val"])
+    items, _ = fetch_media_and_social(
+        entity_name=cfg["entity"],
+        raw_keywords=cfg["keywords"],
+        time_window=cfg["time_val"],
+        max_results=cfg["max_results"],
+        include_news=cfg["include_news"],
+        include_social=cfg["include_social"],
+        include_small_media=cfg["include_small"],
+        match_in_title=cfg["match_title"],
+        exclude_gov=cfg["exclude_gov"],
+        custom_exclude=cfg["custom_exclude"]
     )
 
-    st.subheader("🌐 Jangkauan Sumber Media")
-    inc_news = st.checkbox("Media Nasional (Tier-1)", value=True)
-    inc_small = st.checkbox("Media Lokal & Website Kecil/Daerah", value=True)
-    inc_social = st.checkbox("Media Sosial (IG, FB, Threads, X, TikTok)", value=True)
+    if items:
+        pptx_stream = generate_pptx_deck(cfg["entity"], cfg["org_type"], date_label, items)
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_entity = re.sub(r'[^a-zA-Z0-9_-]', '_', cfg["entity"])
+        filename = f"Auto_Audit_{safe_entity}_{now_str}.pptx"
+        filepath = os.path.join(EXPORT_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(pptx_stream.getvalue())
 
-    st.subheader("⏳ Rentang Waktu Pemantauan")
-    time_options = {
-        "24 Jam Terakhir (1 Hari)": "1d",
-        "2 Hari Terakhir": "2d",
-        "3 Hari Terakhir": "3d",
-        "7 Hari Terakhir (1 Minggu)": "7d",
-        "30 Hari Terakhir (1 Bulan)": "30d",
-        "Semua Waktu (Tanpa Batasan)": "all"
-    }
-    selected_time_label = st.selectbox("Pilih Rentang", list(time_options.keys()), index=1)
-    time_val = time_options[selected_time_label]
-    
-    calculated_date_label = calculate_date_range_label(time_val)
-    st.caption(f"🗓️ **Periode Aktif:** {calculated_date_label}")
+# Inisialisasi scheduler hanya sekali di session singleton
+@st.cache_resource
+def get_scheduler():
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.start()
+    return scheduler
 
-    st.subheader("📊 Kuota Temuan")
-    limit_mode = st.radio("Mode Kuota:", ["Tentukan Jumlah", "Bebas (Seluruhnya)"])
-    if limit_mode == "Tentukan Jumlah":
-        max_news_count = st.number_input("Jumlah Berita/Postingan", min_value=1, max_value=100, value=15, step=5)
-    else:
-        max_news_count = "unlimited"
+scheduler = get_scheduler()
 
-    run_btn = st.button("🚀 Mulai Pemindaian Lintas Media", type="primary")
+def reschedule_jobs(hours_list, is_active):
+    scheduler.remove_all_jobs()
+    if is_active:
+        for hr_str in hours_list:
+            try:
+                parts = hr_str.strip().split(":")
+                h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+                scheduler.add_job(
+                    automated_monitoring_job,
+                    trigger=CronTrigger(hour=h, minute=m),
+                    id=f"job_{h}_{m}",
+                    replace_existing=True
+                )
+            except Exception:
+                pass
 
 # ==========================================
-# 8. DASHBOARD WEB & EKSPOR
+# 7. INTERFACE STREAMLIT
 # ==========================================
-if run_btn:
-    if not (inc_news or inc_small or inc_social):
-        st.error("Silakan centang minimal satu sumber data!")
-    else:
-        with st.spinner("Memindai media nasional, web lokal, medsos, dan menyiapkan slide eksekutif..."):
-            st.session_state['news_data'] = fetch_media_and_social(
+st.title("📡 Media & Social Intelligence Monitoring System")
+st.caption("Pemantauan Berita Nasional, Media Lokal, Medsos dengan Filter Anti-Bias, Mode Jam Terakhir & Ekspor Terjadwal")
+
+tab_manual, tab_scheduler, tab_archives = st.tabs([
+    "🔍 Pemindaian Langsung (Manual)", 
+    "⏰ Pengaturan Penarikan Otomatis (Scheduler)", 
+    "📁 Riwayat Arsip Ekspor (.PPTX)"
+])
+
+# ------------------------------------------
+# TAB 1: PEMINDAIAN MANUAL
+# ------------------------------------------
+with tab_manual:
+    with st.sidebar:
+        st.header("⚙️ Konfigurasi Manual")
+        entity_input = st.text_input("Nama Entitas / Target", value="Bank Mandiri", key="man_ent")
+        org_type_input = st.selectbox("Kategori Entitas", [
+            "Perbankan / Finansial", 
+            "BUMN / Pemerintahan", 
+            "Kehutanan / Lingkungan Hidup",
+            "Korporasi Swasta", 
+            "Lembaga Publik / NGO", 
+            "Personal / Tokoh Publik"
+        ], key="man_org")
+
+        st.subheader("🎯 Kata Kunci Isu")
+        keywords_input = st.text_area(
+            "Daftar Topik / Isu (Pisahkan Koma):",
+            value='csr, "kinerja keuangan", kredit macet, dividen',
+            key="man_kw"
+        )
+        match_title_only = st.checkbox("Wajibkan Kata Kunci di Judul", value=False, key="man_title")
+
+        st.subheader("🛡️ Filter Anti-Bias")
+        exclude_gov_media = st.checkbox("Kecualikan Media Pemerintah (*.go.id)", value=True, key="man_gov")
+        custom_exclude = st.text_input("Kecualikan Domain Resmi Target:", value="bankmandiri.co.id, mandiri.co.id", key="man_dom")
+
+        st.subheader("🌐 Jangkauan Media")
+        inc_news = st.checkbox("Media Nasional (Tier-1)", value=True, key="man_nws")
+        inc_small = st.checkbox("Media Lokal & Website Kecil", value=True, key="man_sml")
+        inc_social = st.checkbox("Media Sosial (IG, FB, Threads, X, TikTok)", value=True, key="man_soc")
+
+        st.subheader("⏳ Rentang Waktu Pemantauan")
+        time_options = {
+            "1 Jam Terakhir": "1h",
+            "3 Jam Terakhir": "3h",
+            "6 Jam Terakhir": "6h",
+            "12 Jam Terakhir": "12h",
+            "24 Jam Terakhir (1 Hari)": "1d",
+            "2 Hari Terakhir": "2d",
+            "3 Hari Terakhir": "3d",
+            "7 Hari Terakhir (1 Minggu)": "7d",
+            "30 Hari Terakhir (1 Bulan)": "30d",
+            "Semua Waktu (Tanpa Batas)": "all"
+        }
+        selected_time_label = st.selectbox("Pilih Rentang Waktu", list(time_options.keys()), index=4, key="man_time")
+        time_val = time_options[selected_time_label]
+        calculated_date_label = calculate_date_range_label(time_val)
+        st.caption(f"🗓️ **Periode Aktif:** {calculated_date_label}")
+
+        st.subheader("📊 Kuota Temuan")
+        limit_mode = st.radio("Mode Kuota:", ["Tentukan Jumlah", "Bebas (Seluruhnya)"], key="man_limit")
+        max_news_count = st.number_input("Jumlah Temuan", min_value=1, max_value=100, value=15, step=5) if limit_mode == "Tentukan Jumlah" else "unlimited"
+
+        run_btn = st.button("🚀 Mulai Pemindaian", type="primary", use_container_width=True)
+
+    if run_btn:
+        with st.spinner("Memindai media nasional, web lokal, dan medsos..."):
+            items, built_query = fetch_media_and_social(
                 entity_name=entity_input,
                 raw_keywords=keywords_input,
                 time_window=time_val,
                 max_results=max_news_count,
                 include_news=inc_news,
                 include_social=inc_social,
-                include_small_media=inc_small
+                include_small_media=inc_small,
+                match_in_title=match_title_only,
+                exclude_gov=exclude_gov_media,
+                custom_exclude=custom_exclude
             )
+            st.session_state['news_data'] = items
             st.session_state['entity'] = entity_input
             st.session_state['org_type'] = org_type_input
             st.session_state['date_label'] = calculated_date_label
+            st.session_state['last_query'] = built_query
 
-if 'news_data' in st.session_state:
-    articles = st.session_state.get('news_data', [])
+    if 'news_data' in st.session_state:
+        articles = st.session_state.get('news_data', [])
+        if 'last_query' in st.session_state:
+            st.caption(f"🔍 **Query Terstruktur:** `{st.session_state['last_query']}`")
 
-    if not articles:
-        st.warning("Tidak ditemukan pemberitaan pada rentang waktu ini. Coba perluas kata kunci atau tambahkan rentang waktu.")
-    else:
-        total_items = len(articles)
-        pos_count = sum(1 for a in articles if a['sentiment'] == "Positif")
-        neg_count = sum(1 for a in articles if a['sentiment'] == "Negatif")
-        neu_count = sum(1 for a in articles if a['sentiment'] == "Netral")
+        if not articles:
+            st.warning("Tidak ditemukan pemberitaan pada rentang waktu ini.")
+        else:
+            total_items = len(articles)
+            pos_count = sum(1 for a in articles if a['sentiment'] == "Positif")
+            neg_count = sum(1 for a in articles if a['sentiment'] == "Negatif")
+            neu_count = sum(1 for a in articles if a['sentiment'] == "Netral")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Temuan", total_items)
-        c2.metric("Sentimen Positif", pos_count)
-        c3.metric("Sentimen Negatif (Mitigasi)", neg_count)
-        c4.metric("Sentimen Netral", neu_count)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Temuan Terverifikasi", total_items)
+            c2.metric("Sentimen Positif", pos_count)
+            c3.metric("Sentimen Negatif (Krisis)", neg_count)
+            c4.metric("Sentimen Netral", neu_count)
 
-        st.divider()
+            st.divider()
 
-        # Unduh PPTX
-        pptx_file = generate_pptx_deck(
-            st.session_state['entity'], 
-            st.session_state['org_type'], 
-            st.session_state['date_label'],
-            articles
-        )
-        st.download_button(
-            label=f"📥 Unduh Laporan Slide Deck ({total_items + 2} Slide .PPTX Termasuk Rangkuman Eksekutif)",
-            data=pptx_file,
-            file_name=f"PR_Audit_{st.session_state['entity'].replace(' ', '_')}.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        )
+            pptx_file = generate_pptx_deck(
+                st.session_state['entity'], 
+                st.session_state['org_type'], 
+                st.session_state['date_label'],
+                articles
+            )
+            st.download_button(
+                label=f"📥 Unduh Laporan Slide Deck ({total_items + 2} Slide .PPTX)",
+                data=pptx_file,
+                file_name=f"PR_Audit_{st.session_state['entity'].replace(' ', '_')}.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
 
-        st.subheader("📋 Kliping Digital & Rekomendasi Media Konsultan")
-        for idx, art in enumerate(articles, 1):
-            with st.container():
-                col_left, col_right = st.columns([1, 1], gap="medium")
-                
-                with col_left:
-                    st.image(art["image_bytes"], caption=f"Capture Dokumen #{idx} - {art['source']}", use_container_width=True)
-                    st.markdown(f"🔗 **Tautan Langsung:** [{art['link'][:70]}...]({art['link']})")
-
-                with col_right:
-                    st.markdown(f"### #{idx}: {art['title']}")
-                    st.caption(f"**Sumber:** {art['source']} | **Waktu:** {art['published']}")
-                    
-                    st.markdown("#### 📝 Ringkasan Isi Berita (Key Points):")
-                    for b in art['bullets']:
-                        st.markdown(f"- {b}")
-                    
+            st.subheader("📋 Kliping Digital & Rekomendasi Media Konsultan")
+            for idx, art in enumerate(articles, 1):
+                with st.container():
+                    col_left, col_right = st.columns([1, 1], gap="medium")
+                    with col_left:
+                        st.image(art["image_bytes"], caption=f"Capture #{idx} - {art['source']}", use_container_width=True)
+                        st.markdown(f"🔗 **Tautan Langsung:** [{art['link'][:70]}...]({art['link']})")
+                    with col_right:
+                        st.markdown(f"### #{idx}: {art['title']}")
+                        st.caption(f"**Sumber:** {art['source']} | **Waktu:** {art['published']}")
+                        st.markdown("#### 📝 Ringkasan Isi Berita (Key Points):")
+                        for b in art['bullets']:
+                            st.markdown(f"- {b}")
+                        st.markdown("---")
+                        badge_color = "🟢" if art['sentiment'] == "Positif" else "🔴" if art['sentiment'] == "Negatif" else "🟡"
+                        st.markdown(f"#### {badge_color} Sentimen: **{art['sentiment']}** ({art['pr_tone']})")
+                        st.info(art['pr_rec'])
                     st.markdown("---")
-                    badge_color = "🟢" if art['sentiment'] == "Positif" else "🔴" if art['sentiment'] == "Negatif" else "🟡"
-                    st.markdown(f"#### {badge_color} Sentimen: **{art['sentiment']}** ({art['pr_tone']})")
-                    st.info(art['pr_rec'])
 
-                st.markdown("---")
+# ------------------------------------------
+# TAB 2: PENGATURAN PENARIKAN OTOMATIS (SCHEDULER)
+# ------------------------------------------
+with tab_scheduler:
+    st.subheader("⏰ Otomatisasi Penarikan & Ekspor PPTX Berulang")
+    st.info("Fitur ini akan menjalankan pemindaian dan langsung mengunduh/menyimpan file presentasi `.pptx` ke server secara otomatis sesuai jam-jam yang ditentukan.")
+
+    cfg = load_scheduler_config()
+
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        sched_active = st.toggle("Aktifkan Penarikan Otomatis", value=cfg.get("active", False))
+        sched_entity = st.text_input("Nama Target Entitas", value=cfg.get("entity", "Bank Mandiri"))
+        sched_org = st.selectbox("Sektor / Kategori", [
+            "Perbankan / Finansial", "BUMN / Pemerintahan", "Kehutanan / Lingkungan Hidup", "Korporasi Swasta", "Lembaga Publik / NGO", "Personal / Tokoh Publik"
+        ], index=0)
+        sched_kw = st.text_area("Kata Kunci Isu Tetap:", value=cfg.get("keywords", 'csr, "kinerja keuangan", kredit macet'))
+
+    with col_s2:
+        hours_str = st.text_input(
+            "Jadwal Jam Eksekusi (Format 24 Jam, pisahkan koma):", 
+            value=", ".join(cfg.get("hours", ["08:00", "13:00", "18:00"])),
+            help="Contoh: 08:00, 12:30, 17:00, 21:00 (Bisa 2 hingga beberapa kali sehari)"
+        )
+
+        sched_time_opts = {
+            "1 Jam Terakhir": "1h",
+            "3 Jam Terakhir": "3h",
+            "6 Jam Terakhir": "6h",
+            "12 Jam Terakhir": "12h",
+            "24 Jam Terakhir": "1d",
+            "2 Hari Terakhir": "2d"
+        }
+        sched_time_label = st.selectbox("Rentang Waktu Tiap Tarikan:", list(sched_time_opts.keys()), index=2)
+        sched_time_val = sched_time_opts[sched_time_label]
+        sched_max = st.number_input("Maksimal Berita Tiap Eksekusi:", min_value=5, max_value=50, value=cfg.get("max_results", 15))
+
+    st.markdown("---")
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        sched_gov = st.checkbox("Kecualikan Media Pemerintah (*.go.id)", value=cfg.get("exclude_gov", True))
+        sched_small = st.checkbox("Jangkau Media Lokal & Web Kecil", value=cfg.get("include_small", True))
+    with col_opt2:
+        sched_soc = st.checkbox("Jangkau Media Sosial (IG/FB/Threads/X)", value=cfg.get("include_social", True))
+        sched_title = st.checkbox("Wajibkan Kata Kunci di Judul", value=cfg.get("match_title", False))
+
+    sched_dom = st.text_input("Kecualikan Domain Resmi Target:", value=cfg.get("custom_exclude", "bankmandiri.co.id, mandiri.co.id"))
+
+    if st.button("💾 Simpan & Terapkan Jadwal Otomatis", type="primary"):
+        parsed_hours = [h.strip() for h in hours_str.split(",") if h.strip()]
+        new_cfg = {
+            "active": sched_active,
+            "hours": parsed_hours,
+            "entity": sched_entity,
+            "org_type": sched_org,
+            "keywords": sched_kw,
+            "time_val": sched_time_val,
+            "max_results": sched_max,
+            "include_news": True,
+            "include_small": sched_small,
+            "include_social": sched_soc,
+            "match_title": sched_title,
+            "exclude_gov": sched_gov,
+            "custom_exclude": sched_dom
+        }
+        save_scheduler_config(new_cfg)
+        reschedule_jobs(parsed_hours, sched_active)
+        st.success("✅ Konfigurasi dan jadwal otomatisasi berhasil disimpan dan aktif!")
+
+    st.markdown("---")
+    if st.button("⚡ Uji Eksekusi Otomatis Sekarang (Test Run)"):
+        with st.spinner("Menjalankan simulasi penarikan dan ekspor PPTX..."):
+            automated_monitoring_job()
+            st.success("✅ Simulasi berhasil! File PPTX telah dibuat dan tersimpan di tab 'Riwayat Arsip Ekspor'.")
+
+# ------------------------------------------
+# TAB 3: RIWAYAT ARSIP EKSPOR (.PPTX)
+# ------------------------------------------
+with tab_archives:
+    st.subheader("📁 Daftar File Presentasi Hasil Penarikan Otomatis")
+    files = [f for f in os.listdir(EXPORT_DIR) if f.endswith(".pptx")]
+    files.sort(reverse=True)
+
+    if not files:
+        st.info("Belum ada file presentasi yang diekspor otomatis. Jalankan 'Test Run' atau tunggu jam eksekusi tiba.")
+    else:
+        st.write(f"Ditemukan **{len(files)} file** laporan tersimpan di server:")
+        for fname in files:
+            fpath = os.path.join(EXPORT_DIR, fname)
+            fsize_kb = round(os.path.getsize(fpath) / 1024, 1)
+            fcol1, fcol2, fcol3 = st.columns([3, 1, 1])
+            with fcol1:
+                st.write(f"📄 **{fname}** ({fsize_kb} KB)")
+            with fcol2:
+                with open(fpath, "rb") as f_data:
+                    st.download_button(
+                        label="📥 Unduh PPTX",
+                        data=f_data.read(),
+                        file_name=fname,
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        key=f"dl_{fname}"
+                    )
+            with fcol3:
+                if st.button("🗑️ Hapus", key=f"del_{fname}"):
+                    os.remove(fpath)
+                    st.rerun()
